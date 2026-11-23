@@ -48,6 +48,22 @@
   .rows .val { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .rows .val .p { font-size: 15px; font-weight: 600; }
   .rows .val .c { font-size: 13px; font-weight: 600; margin-left: 8px; }
+  /* 涨跌家数柱状图 */
+  .bars { display: flex; align-items: flex-end; justify-content: center; gap: 40px; height: 180px; padding: 18px 0 4px; }
+  .bar-col { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 6px; }
+  .bar-count { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bar { width: 72px; border-radius: 6px 6px 0 0; min-height: 3px; }
+  .bar-up { background: var(--up); }
+  .bar-flat { background: #94a3b8; }
+  .bar-down { background: var(--down); }
+  .bar-label { font-size: 13px; color: var(--muted); }
+  .bars-sum { text-align: center; font-size: 13px; color: var(--muted); padding: 6px 0 12px; }
+  /* 板块热度图 */
+  .treemap { position: relative; width: 100%; height: 380px; margin: 12px 0 6px; overflow: hidden; border-radius: 10px; }
+  .tile { position: absolute; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; text-align: center; padding: 2px; cursor: default; }
+  .tile .t-name { font-size: 12px; line-height: 1.35; word-break: break-all; }
+  .tile .t-pct { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .legend { font-size: 12px; color: var(--muted); padding: 2px 0 12px; text-align: center; }
   h3 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 12px 0 2px; }
   /* 新闻 */
   .news { list-style: none; }
@@ -67,6 +83,9 @@
     .idx .pct { font-size: 14px; }
     .idx .left { display: flex; flex-direction: column; }
     section { padding: 14px 14px 6px; }
+    .treemap { height: 320px; }
+    .bars { gap: 22px; }
+    .bar { width: 54px; }
   }
 </style>
 </head>
@@ -77,6 +96,7 @@
     <div class="sub">
       <span id="today"></span>
       <span id="updated">加载中…</span>
+      <span>每 2 小时更新</span>
       <button id="refreshBtn" onclick="load(true)">刷新</button>
     </div>
   </div>
@@ -91,6 +111,13 @@
     <div id="ashareIdx" class="loading">加载中…</div>
     <h3>今日涨幅榜</h3>
     <div id="ashareMovers" class="loading">加载中…</div>
+    <h3>涨跌家数</h3>
+    <div id="breadth" class="loading">加载中…</div>
+  </section>
+  <section>
+    <h2>🔥 板块热度图 <span class="tag">行业板块 · 方块越大成交额越高</span></h2>
+    <div id="treemap" class="loading">加载中…</div>
+    <div class="legend" id="sectorLegend">红色上涨 · 绿色下跌 · 颜色越深涨跌幅越大</div>
   </section>
   <section>
     <h2>🇺🇸 美股 <span class="tag">道指 · 标普 500 · 纳指</span></h2>
@@ -99,7 +126,7 @@
     <div id="usHot" class="loading">加载中…</div>
   </section>
 </main>
-<footer>数据来源：新浪财经、Yahoo Finance、Google 新闻 · 仅供参考，不构成投资建议</footer>
+<footer>数据来源：新浪财经、东方财富、Yahoo Finance、Google 新闻 · 仅供参考，不构成投资建议</footer>
 <script>
 const fmtPct = (p) => (p > 0 ? '+' : '') + p.toFixed(2) + '%';
 const cls = (p) => p > 0 ? 'up' : p < 0 ? 'down' : 'flat';
@@ -139,6 +166,86 @@ function renderNews(el, list) {
     <div class="meta">${n.source}${n.time ? ' · ' + fmtTime(n.time) : ''}</div></li>`).join('') + '</ul>';
 }
 
+function renderBreadth(el, b) {
+  if (!b || !b.total) { el.className = ''; el.innerHTML = empty; return; }
+  el.className = '';
+  const max = Math.max(b.up, b.flat, b.down, 1);
+  const H = 120;
+  const h = (n) => Math.max(3, Math.round((n / max) * H));
+  el.innerHTML = `
+    <div class="bars">
+      <div class="bar-col"><div class="bar-count up">${b.up.toLocaleString()}</div><div class="bar bar-up" style="height:${h(b.up)}px"></div><div class="bar-label">上涨</div></div>
+      <div class="bar-col"><div class="bar-count flat">${b.flat.toLocaleString()}</div><div class="bar bar-flat" style="height:${h(b.flat)}px"></div><div class="bar-label">平盘</div></div>
+      <div class="bar-col"><div class="bar-count down">${b.down.toLocaleString()}</div><div class="bar bar-down" style="height:${h(b.down)}px"></div><div class="bar-label">下跌</div></div>
+    </div>
+    <div class="bars-sum">上涨 ${b.up.toLocaleString()} 家 · 平盘 ${b.flat.toLocaleString()} 家 · 下跌 ${b.down.toLocaleString()} 家 · 共 ${b.total.toLocaleString()} 家</div>`;
+}
+
+let lastSectors = null;
+function tileColor(p) {
+  const a = Math.min(Math.abs(p), 5) / 5;
+  const l = Math.round(94 - a * 50);
+  return p >= 0 ? `hsl(4, 78%, ${l}%)` : `hsl(145, 55%, ${l}%)`;
+}
+function tileTextDark(p) {
+  const a = Math.min(Math.abs(p), 5) / 5;
+  return (94 - a * 50) > 66;
+}
+function worstRatio(row, sum, side) {
+  let mx = -Infinity, mn = Infinity;
+  for (const r of row) { if (r.value > mx) mx = r.value; if (r.value < mn) mn = r.value; }
+  return Math.max((side * side * mx) / (sum * sum), (sum * sum) / (side * side * mn));
+}
+function treemapLayout(items, W, H) {
+  const total = items.reduce((s, it) => s + it.value, 0);
+  const rects = [];
+  let x = 0, y = 0, w = W, h = H, remaining = total, i = 0;
+  while (i < items.length && remaining > 0 && w > 1 && h > 1) {
+    const horizontal = w >= h;
+    const side = horizontal ? w : h;
+    let row = [], rowSum = 0, best = Infinity;
+    while (i < items.length) {
+      const v = items[i].value;
+      const tSum = rowSum + v;
+      const r = worstRatio(row.concat([items[i]]), tSum, side);
+      if (row.length && r > best) break;
+      row.push(items[i]); rowSum = tSum; best = r; i++;
+    }
+    if (horizontal) {
+      const rh = (rowSum / remaining) * h;
+      let rx = x;
+      for (const it of row) { const rw = (it.value / rowSum) * w; rects.push({ item: it, x: rx, y, w: rw, h: rh }); rx += rw; }
+      y += rh; h -= rh;
+    } else {
+      const rw = (rowSum / remaining) * w;
+      let ry = y;
+      for (const it of row) { const rh = (it.value / rowSum) * h; rects.push({ item: it, x, y: ry, w: rw, h: rh }); ry += rh; }
+      x += rw; w -= rw;
+    }
+    remaining -= rowSum;
+  }
+  return rects;
+}
+function renderTreemap(el, list) {
+  if (!list || !list.length) { el.className = ''; el.innerHTML = empty; return; }
+  lastSectors = list;
+  el.className = 'treemap';
+  const W = el.clientWidth || 900;
+  const H = el.clientHeight || 380;
+  const items = list.map((s) => ({ ...s, value: s.amount }));
+  const rects = treemapLayout(items, W, H);
+  el.innerHTML = rects.map(({ item: s, x, y, w, h }) => {
+    const ww = Math.max(0, w - 2), hh = Math.max(0, h - 2);
+    const dark = tileTextDark(s.pct);
+    const showName = ww >= 62 && hh >= 34;
+    const showPct = ww >= 40 && hh >= 20;
+    const inner = showName
+      ? `<div class="t-name">${s.name}</div><div class="t-pct">${fmtPct(s.pct)}</div>`
+      : showPct ? `<div class="t-pct">${fmtPct(s.pct)}</div>` : '';
+    return `<div class="tile" title="${s.name} ${fmtPct(s.pct)}" style="left:${x + 1}px;top:${y + 1}px;width:${ww}px;height:${hh}px;background:${tileColor(s.pct)};color:${dark ? '#1e293b' : '#fff'}">${inner}</div>`;
+  }).join('');
+}
+
 async function load(manual) {
   const btn = document.getElementById('refreshBtn');
   if (manual) { btn.disabled = true; btn.textContent = '刷新中…'; }
@@ -148,6 +255,11 @@ async function load(manual) {
     renderNews(document.getElementById('news'), d.news);
     renderIndices(document.getElementById('ashareIdx'), d.ashare && d.ashare.indices);
     renderRows(document.getElementById('ashareMovers'), d.ashare && d.ashare.movers, true);
+    renderBreadth(document.getElementById('breadth'), d.ashare && d.ashare.breadth);
+    const sec = d.sectors;
+    renderTreemap(document.getElementById('treemap'), sec && sec.list);
+    document.getElementById('sectorLegend').textContent =
+      '红色上涨 · 绿色下跌 · 颜色越深涨跌幅越大 · 数据：' + (sec && sec.source === 'sina' ? '中证全指行业指数' : '东方财富行业板块');
     renderIndices(document.getElementById('usIdx'), d.us && d.us.indices);
     renderRows(document.getElementById('usHot'), d.us && d.us.hot, false);
     document.getElementById('updated').textContent = '更新于 ' + fmtTime(d.updatedAt);
@@ -161,7 +273,14 @@ async function load(manual) {
 document.getElementById('today').textContent =
   new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
 load(false);
-setInterval(() => load(false), 5 * 60 * 1000);
+setInterval(() => load(false), 2 * 60 * 60 * 1000);
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (lastSectors) renderTreemap(document.getElementById('treemap'), lastSectors);
+  }, 200);
+});
 </script>
 </body>
 </html>

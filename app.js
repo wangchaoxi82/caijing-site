@@ -1,5 +1,5 @@
 // 财经快讯站 — 零依赖 Node.js 应用
-// 数据全部来自免费公开接口（无 Key）：新浪财经、Yahoo Finance、Google 新闻 RSS
+// 数据全部来自免费公开接口（无 Key）：新浪财经、东方财富、Yahoo Finance、Google 新闻 RSS
 // 任一来源失败时对应栏目显示"暂无数据"，绝不编造数字或标题。
 const http = require('node:http');
 const fs = require('node:fs');
@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟缓存
+const CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 小时缓存
 const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' };
 const SINA_HEADERS = { ...UA, Referer: 'https://finance.sina.com.cn' };
 
@@ -69,6 +69,99 @@ async function getAshareMovers() {
     }))
     .filter((d) => d.name && Number.isFinite(d.price) && Number.isFinite(d.pct));
   return out.length ? out : null;
+}
+
+// ---------- A股涨跌家数：新浪 Market Center 全市场统计 ----------
+// 注意：新浪每页最多返回 100 只（num 再大也会被截断），所以按 100 只一页分页拉取。
+async function getMarketBreadth() {
+  const NUM = 100, MAX_PAGES = 60, BATCH = 10;
+  let rows = [];
+  for (let start = 1; start <= MAX_PAGES; start += BATCH) {
+    const pages = [];
+    for (let p = start; p < Math.min(start + BATCH, MAX_PAGES + 1); p++) pages.push(p);
+    const results = await Promise.allSettled(pages.map((p) =>
+      fetchJson(`https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=${p}&num=${NUM}&sort=symbol&asc=1&node=hs_a&symbol=&_s_r_a=init`, SINA_HEADERS)
+    ));
+    let done = false;
+    for (const r of results) {
+      if (r.status !== 'fulfilled' || !Array.isArray(r.value)) return null; // 任一页失败则不返回不完整的统计
+      rows = rows.concat(r.value);
+      if (r.value.length < NUM) { done = true; break; }
+    }
+    if (done) break;
+  }
+  // 合理性校验：A股总数约 5300 只，行数过少说明接口被限流/截断，宁可不显示也不给错数
+  if (rows.length < 3000) {
+    console.error(`ashare breadth: only ${rows.length} rows, discarding`);
+    return null;
+  }
+  let up = 0, flat = 0, down = 0;
+  for (const d of rows) {
+    const pct = parseFloat(d.changepercent);
+    if (!Number.isFinite(pct)) continue;
+    if (pct > 0) up++;
+    else if (pct < 0) down++;
+    else flat++;
+  }
+  return { up, flat, down, total: up + flat + down };
+}
+
+// ---------- 行业板块：东方财富板块行情（成交额前 40），失败则用中证全指行业指数 ----------
+// 备选指数（新浪 hq 实测有数据）：全指能源/材料/可选/医药/金融/信息 + 中证消费（全指消费新浪无数据）。
+const SECTOR_INDEX_FALLBACK = [
+  's_sh000986', 's_sh000987', 's_sh000989', 's_sh000932', 's_sh000991', 's_sh000992', 's_sh000993',
+];
+
+async function getSectorBoardsFromSina() {
+  const text = await fetchText(
+    `https://hq.sinajs.cn/list=${SECTOR_INDEX_FALLBACK.join(',')}`,
+    'gbk',
+    SINA_HEADERS
+  );
+  const out = [];
+  for (const code of SECTOR_INDEX_FALLBACK) {
+    const m = text.match(new RegExp(`hq_str_${code}="([^"]*)"`));
+    if (!m) continue;
+    const f = m[1].split(',');
+    const name = f[0];
+    const pct = parseFloat(f[3]);
+    const amount = parseFloat(f[5]); // 新浪指数成交额单位是万元
+    if (name && Number.isFinite(pct) && Number.isFinite(amount) && amount > 0) {
+      out.push({ name, code: code.replace('s_sh', ''), pct, amount: amount * 10000 });
+    }
+  }
+  return out.length >= 3 ? out : null; // 至少 3 个才有意义
+}
+
+async function getSectorBoards() {
+  try {
+    const d = await fetchJson(
+      'https://push2.eastmoney.com/api/qt/clist/get?fid=f3&po=1&pz=120&pn=1&np=1&fltt=2&invt=2&fs=m:90+t:2&fields=f2,f3,f6,f12,f14'
+    );
+    const list = d?.data?.diff;
+    if (Array.isArray(list) && list.length) {
+      const out = list
+        .map((b) => ({
+          name: b.f14,
+          code: b.f12,
+          pct: typeof b.f3 === 'number' ? b.f3 : parseFloat(b.f3),
+          amount: typeof b.f6 === 'number' ? b.f6 : parseFloat(b.f6),
+        }))
+        .filter((b) => b.name && Number.isFinite(b.pct) && Number.isFinite(b.amount) && b.amount > 0);
+      if (out.length) {
+        out.sort((a, b) => b.amount - a.amount);
+        return { source: 'eastmoney', list: out.slice(0, 40) };
+      }
+    }
+  } catch (e) {
+    console.error('sectors eastmoney failed:', e.message);
+  }
+  const sina = await getSectorBoardsFromSina().catch((e) => {
+    console.error('sectors sina fallback failed:', e.message);
+    return null;
+  });
+  if (sina) return { source: 'sina', list: sina };
+  return null;
 }
 
 // ---------- 美股：Yahoo Finance chart API（query1 失败则试 query2） ----------
@@ -198,25 +291,51 @@ async function getNews() {
   }
 }
 
-// ---------- 聚合（带缓存） ----------
+// ---------- 聚合（带缓存；过期后先返回旧数据、后台刷新，避免访问者等 18 秒） ----------
+let refreshPromise = null;
+function refreshCache() {
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        const [indices, movers, breadth, sectors, usIndices, usHot, news] = await Promise.all([
+          getAshareIndices().catch((e) => { console.error('ashare indices failed:', e.message); return null; }),
+          getAshareMovers().catch((e) => { console.error('ashare movers failed:', e.message); return null; }),
+          getMarketBreadth().catch((e) => { console.error('ashare breadth failed:', e.message); return null; }),
+          getSectorBoards().catch((e) => { console.error('sectors failed:', e.message); return null; }),
+          getUsQuotes(US_INDEX).catch((e) => { console.error('us indices failed:', e.message); return null; }),
+          getUsQuotes(US_HOT).catch((e) => { console.error('us hot failed:', e.message); return null; }),
+          getNews(),
+        ]);
+        cache = {
+          at: Date.now(),
+          data: {
+            updatedAt: new Date().toISOString(),
+            news,
+            ashare: { indices, movers, breadth },
+            sectors,
+            us: { indices: usIndices, hot: usHot },
+          },
+        };
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+  }
+  return refreshPromise;
+}
+
 async function getData() {
   if (cache.data && Date.now() - cache.at < CACHE_TTL_MS) return cache.data;
-  const [indices, movers, usIndices, usHot, news] = await Promise.all([
-    getAshareIndices().catch((e) => { console.error('ashare indices failed:', e.message); return null; }),
-    getAshareMovers().catch((e) => { console.error('ashare movers failed:', e.message); return null; }),
-    getUsQuotes(US_INDEX).catch((e) => { console.error('us indices failed:', e.message); return null; }),
-    getUsQuotes(US_HOT).catch((e) => { console.error('us hot failed:', e.message); return null; }),
-    getNews(),
-  ]);
-  const data = {
-    updatedAt: new Date().toISOString(),
-    news,
-    ashare: { indices, movers },
-    us: { indices: usIndices, hot: usHot },
-  };
-  cache = { at: Date.now(), data };
-  return data;
+  if (cache.data) {
+    refreshCache(); // 有旧数据：先返回，后台刷新
+    return cache.data;
+  }
+  await refreshCache(); // 冷启动：等第一次抓完
+  return cache.data;
 }
+
+// 启动时预热缓存，第一个访问者不用等
+refreshCache();
 
 // ---------- HTTP 服务 ----------
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'index.html'));

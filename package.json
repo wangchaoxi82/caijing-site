@@ -1,0 +1,1 @@
+{"description":"财经快讯站：当天热门财经新闻、A股、美股行情","engines":{"node":">=18"},"main":"app.js","name":"caijing-site","private":true,"scripts":{"start":"node app.js"},"version":"1.0.0"}
